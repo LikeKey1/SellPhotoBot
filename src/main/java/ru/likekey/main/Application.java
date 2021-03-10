@@ -1,5 +1,7 @@
 package ru.likekey.main;
 
+import com.vk.api.sdk.objects.messages.Message;
+import com.vk.api.sdk.queries.messages.MessagesGetLongPollHistoryQuery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -9,17 +11,13 @@ import com.vk.api.sdk.client.actors.GroupActor;
 import com.vk.api.sdk.exceptions.ApiException;
 import com.vk.api.sdk.exceptions.ClientException;
 import com.vk.api.sdk.httpclient.HttpTransportClient;
-import ru.likekey.main.vk.jobs.Job;
-import ru.likekey.main.vk.jobs.MessagesJob;
-import ru.likekey.main.vk.storage.DataStorage;
+import ru.likekey.main.vk.callback.MessagesHandler;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Properties;
-import java.util.concurrent.TimeUnit;
 
 public class Application {
 
@@ -33,7 +31,7 @@ public class Application {
 
     private static VkApiClient vk;
 
-    private static final List<Job> jobs = new ArrayList<>();
+    private static Integer ts;
 
     public static void main(String[] args) throws Exception {
         init();
@@ -48,56 +46,40 @@ public class Application {
         groupId = Integer.valueOf(properties.getProperty("vk.group.id"));
 
         initClients(properties);
-        initData(properties);
-
-        initJobs();
     }
 
-    private static void initClients(Properties properties) throws IOException {
+    private static void initClients(Properties properties) throws IOException, ClientException, ApiException {
         TransportClient client = HttpTransportClient.getInstance();
         vk = new VkApiClient(client);
 
         actor = new GroupActor(Integer.parseInt(properties.getProperty("vk.group.id")), properties.getProperty("vk.group.token"));
-    }
-
-    private static void initJobs() throws ClientException, ApiException {
-        jobs.add(new MessagesJob());
-    }
-
-    private static void initData(Properties properties) throws IOException {
-        String dataDirectoryPath = properties.getProperty("data.global");
-        File dataDirectory = new File(dataDirectoryPath);
-        if (!dataDirectory.exists()) {
-            LOG.warn("data directory not exist. Create " + dataDirectory.getPath());
-            dataDirectory.mkdir();
-        }
-
-        File dataPath = new File(dataDirectoryPath + "/data.properties");
-        if (!dataPath.exists()) {
-            LOG.warn("data.properties not exist. Create " + dataPath.getPath());
-            dataPath.createNewFile();
-        }
-
-        DataStorage dataStorage = DataStorage.getInstance();
-        dataStorage.load(dataPath.getPath());
+        ts = vk.messages().getLongPollServer(actor).execute().getTs();
     }
 
     private static void run() throws Exception {
-        if (jobs.isEmpty()) {
-            LOG.warn("No jobs configured. Exist");
-            return;
-        }
-
         while (true) {
-            for (Job job : jobs) {
-                try {
-                    job.doJob();
-                } catch (Exception e) {
-                    LOG.error("Something wrong" + e);
-                }
+            MessagesGetLongPollHistoryQuery historyQuery =  vk.messages().getLongPollHistory(actor).ts(ts);
+            List<Message> messages;
+            try {
+                messages = historyQuery.execute().getMessages().getItems();
+            } catch (Exception e) {
+                System.out.println("\n---Ошибка 10 VkApi---\n");
+                Thread.sleep(30000);
+                continue;
             }
 
-            TimeUnit.SECONDS.sleep(1);
+            if (!messages.isEmpty()) {
+                Iterator<Message> iterator = messages.iterator();
+                while (iterator.hasNext()) {
+                    if (iterator.next().getFromId() < 1) iterator.remove();
+                }
+                messages.forEach(message -> {
+                    MessagesHandler.parseMessage(groupId ,message);
+                });
+            }
+
+            ts = vk.messages().getLongPollServer(actor).execute().getTs();
+            Thread.sleep(500);
         }
     }
 
@@ -120,6 +102,8 @@ public class Application {
     public static VkApiClient vk() {
         return vk;
     }
+
+    public static Integer ts() {return ts; }
 
     public static String getVersion() {
         return version;
